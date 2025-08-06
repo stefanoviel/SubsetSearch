@@ -1,116 +1,157 @@
+import time
+import random # Import the random module for delays
 from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
-def request_extract_links(url: str) -> list[str]:
-    page_source = requests.get(url)
-    soup = BeautifulSoup(page_source.text, 'html.parser')
+# --- New Imports for Retry Logic ---
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+# --- Selenium Imports ---
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options
+
+def get_fully_scrolled_page_source(url: str) -> str:
+    """
+    Uses Selenium to open a URL, scroll to the very bottom to load all dynamic
+    content, and then returns the final page source HTML.
+    """
+    print("Launching browser to scroll through the page...")
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--window-size=1920,1080")
+    driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=chrome_options)
+    driver.get(url)
+    last_height = driver.execute_script("return document.body.scrollHeight")
+    while True:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+        new_height = driver.execute_script("return document.body.scrollHeight")
+        if new_height == last_height:
+            break
+        last_height = new_height
+        print(f"Scrolled down, new page height is {new_height} pixels.")
+    print("Finished scrolling. Extracting page source.")
+    page_source = driver.page_source
+    driver.quit()
+    return page_source
+
+def request_extract_links(url: str, page_source: str = None, session: requests.Session = None) -> list[str]:
+    """
+    Modified to accept a requests.Session object for making requests.
+    """
+    if page_source is None:
+        # Use the provided session object if it exists, otherwise use plain requests
+        requester = session or requests
+        response = requester.get(url)
+        response.raise_for_status()
+        page_source = response.text
+
+    soup = BeautifulSoup(page_source, 'html.parser')
     links = soup.find_all('a')
-
     extracted_links = []
     for link in links:
         href = link.get('href')
-        if href:
-            # Filter for absolute URLs
-            if href.startswith('http://') or href.startswith('https://'):
-                    extracted_links.append(href)
-
+        if href and (href.startswith('http://') or href.startswith('https://')):
+            extracted_links.append(href)
     return extracted_links
 
-def extract_posts(url): 
+def extract_posts(url: str, page_source: str) -> list[str]:
     """
-    This function takes a URL of a blog page, extracts all the links to individual blog posts,
-    and returns them as a list.
+    Extracts all links to individual blog posts, IGNORING comment pages.
     """
-    # Extract all links from the page
-    links = request_extract_links(url)
-
+    links = request_extract_links(url, page_source=page_source)
     parsed_url = urlparse(url)
     base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
     blog_posts = []
-    if links is not None:
+    if links:
         for link in links:
-            if link.startswith(base_url) and link not in blog_posts:
+            # ***MODIFIED***: Added check to filter out /comments URLs at the source
+            if link.startswith(base_url) and '/p/' in link and not link.endswith('/comments') and link not in blog_posts:
                 blog_posts.append(link)
-    
     return blog_posts
 
-def extract_links_from_post(url: str) -> list[str]:
+def extract_links_from_post(url: str, session: requests.Session) -> list[str]:
     """
-    This function is a wrapper to extract blog post links from a given URL.
-    It uses the extract_blog_posts function defined above.
+    ***MODIFIED***: This function now requires a session object to make its request.
+    This ensures it uses our retry and header logic.
     """
+    try:
+        # Use the session to make the request
+        links = request_extract_links(url, session=session)
+        extracted_links = []
+        if links:
+            for link in links:
+                if "substack" not in link and link not in extracted_links:
+                    extracted_links.append(link)
+        return extracted_links
+    except requests.exceptions.RequestException as e:
+        print(f"Could not fetch {url} after multiple retries: {e}")
+        return []
 
-    links = request_extract_links(url)
-
-    extracted_links = []
-    if links is not None:
-        for link in links:
-            if "substack" not in link and link not in extracted_links:
-                extracted_links.append(link)
-    
-    return extracted_links
-
-
-def crawl_all_websites(url) -> list[str]:
+def crawl_posts_from_archive(url: str) -> list[str]:
     results = []
-    visited = set()  # To keep track of visited URLs
-    to_visit = [url]
-
-    # while to_visit:
-    for _ in range(5):
-        if not to_visit:
-            break 
-        current_url = to_visit.pop(0)
-        # print(f"Crawling: {current_url}")
-        visited.add(current_url)
-
-        post_links = extract_posts(current_url)
-        results.extend(post_links)
-
-        for link in post_links:
-            blog_links = extract_links_from_post(link)
-            results.extend(blog_links)
-            print(f"Found {len(blog_links)} blog links in {link}")
-
-            for blog_link in blog_links:
-                parsed_url = urlparse(blog_link)
-                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                if base_url not in visited and base_url not in to_visit and base_url != "https://enable-javascript.com":
-                    to_visit.append(base_url)
-                    print(f"Added {base_url} to visit list.")
-
-        print(f"Total links found so far: {len(results)}")
     
-    # Remove duplicates by converting the list to a set and back to a list
-    results = list(set(results))
-    return results
+    archive_page_source = get_fully_scrolled_page_source(url)
+    post_links = extract_posts(url, page_source=archive_page_source)
+    print(f"\nFound {len(post_links)} unique post links (excluding comments) in the archive page: {url}")
+    results.extend(post_links)
 
+    # --- ***NEW***: Setup requests session with retry logic ---
+    session = requests.Session()
+    # Add a user-agent header to look more like a real browser
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+    
+    # Define our retry strategy
+    retry_strategy = Retry(
+        total=3,  # Total number of retries
+        status_forcelist=[429, 500, 502, 503, 504],  # Status codes to retry on
+        backoff_factor=1  # Wait 1s, 2s, 4s between retries
+    )
+    # Mount the strategy to the session
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    # --- End of session setup ---
 
-def filter_comment_urls(url_list):
+    for i, link in enumerate(post_links):
+        # ***MODIFIED***: Pass the session object to the extraction function
+        blog_links = extract_links_from_post(link, session)
+        results.extend(blog_links)
+        print(f"({i+1}/{len(post_links)}) Found {len(blog_links)} external links in post: {link}")
+        
+        # ***NEW***: Add a "polite" delay between requests
+        time.sleep(random.uniform(0.5, 1.5)) # Sleep for 0.5 to 1.5 seconds
 
-  # Use a list comprehension to create a new list.
-  # It includes a URL only if the substring "comment/" is not found in it.
-  filtered_list = [url for url in url_list if "comment/" not in url]
-  filtered_list = [url for url in url_list if "/comment" not in url]
-  return filtered_list
+    print(f"\nTotal links found (before deduplication): {len(results)}")
+    unique_results = list(set(results))
+    print(f"Total unique links found: {len(unique_results)}")
+    return unique_results
+
+# (The filter_comment_urls function is no longer strictly necessary if we filter at the source,
+# but it's good to keep as a final cleanup step just in case)
+def filter_comment_urls(url_list: list[str]) -> list[str]:
+    filtered_list = [url for url in url_list if "comment/" not in url and "/comment" not in url]
+    return filtered_list
 
 if __name__ == "__main__":
     import argparse
 
-    # --- Set up command-line argument parsing ---
-    parser = argparse.ArgumentParser(description="Extract blog post links from a webpage.")
-    parser.add_argument("--url", help="The URL of the blog page to scrape.")
+    parser = argparse.ArgumentParser(description="Extract blog post links from a webpage with infinite scroll.")
+    parser.add_argument("--url", help="The URL of the blog page to scrape.", required=True)
     args = parser.parse_args()
 
-    # --- Run the extraction ---
-    found_blog_posts = crawl_all_websites(args.url)
-
-    # --- Filter out comment URLs ---
+    found_blog_posts = crawl_posts_from_archive(args.url)
     found_blog_posts = filter_comment_urls(found_blog_posts)
+    found_blog_posts.sort()
 
-    with open("extracted_links.txt", "w") as f:
+    output_filename = "extracted_links.txt"
+    with open(output_filename, "w", encoding='utf-8') as f:
         for link in found_blog_posts:
             f.write(link + "\n")
+    
+    print(f"\nSuccessfully saved {len(found_blog_posts)} links to {output_filename}")
