@@ -60,7 +60,7 @@ def crawl_all_websites(url) -> list[str]:
     to_visit = [url]
 
     # while to_visit:
-    for _ in range(10):
+    for _ in range(5):
         if not to_visit:
             break 
         current_url = to_visit.pop(0)
@@ -77,13 +77,15 @@ def crawl_all_websites(url) -> list[str]:
 
             for blog_link in blog_links:
                 parsed_url = urlparse(blog_link)
-                print("parsed_url: ", parsed_url)
-                if parsed_url.netloc not in visited and parsed_url.netloc not in to_visit:
-                    to_visit.append(f"{parsed_url.scheme}://{parsed_url.netloc}")
-                    print(f"Added {parsed_url.scheme}://{parsed_url.netloc} to visit list.")
+                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                if base_url not in visited and base_url not in to_visit and base_url != "https://enable-javascript.com":
+                    to_visit.append(base_url)
+                    print(f"Added {base_url} to visit list.")
 
         print(f"Total links found so far: {len(results)}")
     
+    # Remove duplicates by converting the list to a set and back to a list
+    results = list(set(results))
     return results
 
 
@@ -92,6 +94,7 @@ def filter_comment_urls(url_list):
   # Use a list comprehension to create a new list.
   # It includes a URL only if the substring "comment/" is not found in it.
   filtered_list = [url for url in url_list if "comment/" not in url]
+  filtered_list = [url for url in url_list if "/comment" not in url]
   return filtered_list
 
 if __name__ == "__main__":
