@@ -60,7 +60,9 @@ def crawl_all_websites(url) -> list[str]:
     to_visit = [url]
 
     # while to_visit:
-    for _ in range(5): 
+    for _ in range(10):
+        if not to_visit:
+            break 
         current_url = to_visit.pop(0)
         # print(f"Crawling: {current_url}")
         visited.add(current_url)
@@ -85,6 +87,13 @@ def crawl_all_websites(url) -> list[str]:
     return results
 
 
+def filter_comment_urls(url_list):
+
+  # Use a list comprehension to create a new list.
+  # It includes a URL only if the substring "comment/" is not found in it.
+  filtered_list = [url for url in url_list if "comment/" not in url]
+  return filtered_list
+
 if __name__ == "__main__":
     import argparse
 
@@ -95,6 +104,9 @@ if __name__ == "__main__":
 
     # --- Run the extraction ---
     found_blog_posts = crawl_all_websites(args.url)
+
+    # --- Filter out comment URLs ---
+    found_blog_posts = filter_comment_urls(found_blog_posts)
 
     with open("extracted_links.txt", "w") as f:
         for link in found_blog_posts:
