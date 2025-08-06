@@ -4,6 +4,7 @@ import time
 import random # Import the random module for delays
 from urllib.parse import urlparse
 import requests
+from tqdm import tqdm  # Import tqdm for progress bar
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -59,7 +60,7 @@ def request_extract_links(url: str, page_source: str = None, session: requests.S
             extracted_links.append(href)
     return extracted_links, page_source
 
-def extract_posts(url: str, page_source: str) -> tuple[list[str], str]:
+def extract_links_and_filter(url: str, page_source: str) -> tuple[list[str], str]:
     """
     Extracts all links to individual blog posts, IGNORING comment pages.
     """
@@ -94,7 +95,7 @@ def crawl_posts_from_archive(url: str) -> tuple[list[str], dict[str, str]]:
     all_page_sources = {}
     
     archive_page_source = get_fully_scrolled_page_source(url)
-    post_links, page_source = extract_posts(url, page_source=archive_page_source)
+    post_links, page_source = extract_links_and_filter(url, page_source=archive_page_source)
     print(f"\nFound {len(post_links)} unique post links (excluding comments) in the archive page: {url}")
     all_links.extend(post_links)
     all_page_sources[url] = page_source
@@ -116,28 +117,40 @@ def crawl_posts_from_archive(url: str) -> tuple[list[str], dict[str, str]]:
     session.mount("http://", adapter)
     # --- End of session setup ---
 
-    for i, link in enumerate(post_links):
+    for link in tqdm(post_links, desc="Extracting post from archive"):
         blog_links, page_source = extract_links_from_post(link, session)
         all_links.extend(blog_links)
         all_page_sources[link] = page_source
-        print(f"({i+1}/{len(post_links)}) Found {len(blog_links)} external links in post: {link}")
         time.sleep(random.uniform(0.5, 1.5)) # Sleep for 0.5 to 1.5 seconds
 
+    found_blog_posts = filter_comment_urls(all_links)
+
+    for link in tqdm(found_blog_posts, desc="Downloading post additional links"):
+        if  link not in all_page_sources.keys() and "wiki" not in link and "substack.com" not in link:
+            _, content = request_extract_links(link, session=session)
+            all_page_sources[link] = content
+        
     print(f"\nTotal links found (before deduplication): {len(all_links)}")
     unique_results = list(set(all_links))
     print(f"Total unique links found: {len(unique_results)}")
     return unique_results, all_page_sources
 
+def filter_comment_urls(url_list):
+
+  # Use a list comprehension to create a new list.
+  # It includes a URL only if the substring "comment/" is not found in it.
+  filtered_list = [url for url in url_list if "comment/" not in url]
+  filtered_list = [url for url in url_list if "/comment" not in url]
+  return filtered_list
+
 
 if __name__ == "__main__":
-
 
     parser = argparse.ArgumentParser(description="Extract blog post links from a webpage with infinite scroll.")
     parser.add_argument("--url", help="The URL of the blog page to scrape.", required=True)
     args = parser.parse_args()
 
     found_blog_posts, page_sources = crawl_posts_from_archive(args.url)
-    found_blog_posts.sort()
 
     output_filename = "extracted_links.txt"
     with open(output_filename, "w", encoding='utf-8') as f:
